@@ -11,7 +11,52 @@ from typing import Optional, Tuple, List, Dict, Any
 import aiohttp
 import pytz
 from apscheduler.triggers.cron import CronTrigger
-from cloakbrowser import launch_context_async
+
+try:
+    # 优先使用 CloakBrowser（MoviePilot v2.15.x 容器已内置）
+    from cloakbrowser import launch_context_async
+except ImportError:
+    # 兜底：CloakBrowser 不可用时（如 MoviePilot v2.9.x 容器未预装）降级到容器内置 Playwright。
+    # v2.9.x 镜像通过 playwright install-deps + entrypoint `playwright install chromium` 预装了
+    # Playwright 与 Chromium 内核，接口与 CloakBrowser 返回的 BrowserContext 完全一致。
+    from playwright.async_api import async_playwright
+
+    class _PlaywrightContext:
+        """CloakBrowser BrowserContext 的最小兼容包装：close 时级联清理 browser 与 playwright 驱动。"""
+
+        def __init__(self, context, browser, playwright):
+            self._context = context
+            self._browser = browser
+            self._playwright = playwright
+            self._closed = False
+
+        def __getattr__(self, name):
+            return getattr(self._context, name)
+
+        async def close(self):
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                await self._context.close()
+            finally:
+                try:
+                    await self._browser.close()
+                finally:
+                    await self._playwright.stop()
+
+    async def launch_context_async(headless=True, proxy=None, args=None, **kwargs):
+        """Playwright 版 launch_context_async，仅覆盖插件实际用到的参数子集
+        （headless / args / extra_http_headers 等 new_context 参数）。"""
+        playwright = await async_playwright().start()
+        launch_kwargs: dict = {"headless": bool(headless)}
+        if args:
+            launch_kwargs["args"] = list(args)
+        if proxy:
+            launch_kwargs["proxy"] = proxy if isinstance(proxy, dict) else {"server": proxy}
+        browser = await playwright.chromium.launch(**launch_kwargs)
+        context = await browser.new_context(**kwargs)
+        return _PlaywrightContext(context, browser, playwright)
 
 from app.core.config import settings
 from app.core.event import eventmanager, Event
@@ -31,7 +76,7 @@ class DynamicWeChat(_PluginBase):
     # 插件图标
     plugin_icon = "Wecom_A.png"
     # 插件版本
-    plugin_version = "2.1.8"
+    plugin_version = "2.1.9-jack"
     # 插件作者
     plugin_author = "RamenRa"
     # 作者主页
